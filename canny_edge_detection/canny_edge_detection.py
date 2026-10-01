@@ -1,16 +1,21 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import cv2
 import os
 
 img_dir = "./assets/images"
 imgs = []
 
 def imageloader():
+    os.makedirs(f"{img_dir}", exist_ok=True)
+    os.makedirs("./assets/results", exist_ok=True)
+    os.makedirs("./assets/outputs", exist_ok=True)
     for fname in os.listdir(img_dir):
         if fname.lower().endswith((".jpg", ".jpeg", ".png")):
             full_path = os.path.join(img_dir, fname)
             img = plt.imread(full_path)
-            imgs.append(img)
+            imgs.append((img, os.path.splitext(fname)[0]))
+
 
 
 # correlation and convolution
@@ -127,24 +132,28 @@ def double_threshold_hysteresis(edges):
     return out
 
 
-def canny_edge_detection(img):
+def canny_edge_detection(img, fname):
     gray = grayScale(img)
     X = low_pass(gray, 5, 1, "keep")
     G, ang = sobel_edge_detection(X)
     nms = NMS(G, ang)
-    return double_threshold_hysteresis(nms)
+    out = double_threshold_hysteresis(nms)
+    result = cv2.cvtColor(out.astype(np.uint8) * 255, cv2.COLOR_GRAY2BGR)
+    cv2.imwrite(f"./assets/results/{fname}_.png", result)
+    print(f"{fname}_.png saved")
+    return result
 
 
 if __name__ == "__main__":
     imageloader()
-    fig, axes = plt.subplots(nrows = len(imgs), ncols = 2, figsize = (10, 5))
-    for i in range(len(imgs)):
-        axes[i, 0].imshow(imgs[i], cmap="gray" if imgs[i].ndim == 2 else None)
-        axes[i, 0].set_title(f"Origin.{i + 1}")
+    fig, axes = plt.subplots(nrows = len(imgs), ncols = 2, figsize = (10, 5), squeeze=False)
+    for i, (img, fname) in enumerate(imgs):
+        axes[i, 0].imshow(img, cmap="gray" if img.ndim == 2 else None)
+        axes[i, 0].set_title(f"{fname}.Origin")
         axes[i, 0].axis("off")
-        axes[i, 1].imshow(canny_edge_detection(imgs[i]), cmap="gray", vmin=0, vmax=1)
-        axes[i, 1].set_title(f"Edge.{i + 1}")
+        axes[i, 1].imshow(cv2.cvtColor(canny_edge_detection(img, fname), cv2.COLOR_BGR2RGB))
+        axes[i, 1].set_title(f"{fname}.Blobs")
         axes[i, 1].axis("off")
     plt.tight_layout()
-    fig.savefig("./assets/results/result.png", dpi = 300, bbox_inches = "tight")
+    fig.savefig("./assets/outputs/output.png", dpi = 300, bbox_inches = "tight")
     plt.show()
