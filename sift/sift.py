@@ -1,8 +1,12 @@
 import matplotlib.pyplot as plt
 import matplotlib.patches as pths
 import numpy as np
+import random
 import cv2
 import os
+
+
+random.seed(0)
 
 img_dir = "./assets/images"
 imgs = []
@@ -17,6 +21,7 @@ def imageloader():
             full_path = os.path.join(img_dir, fname)
             img = plt.imread(full_path)
             imgs.append((img, os.path.splitext(fname)[0]))
+    imgs.sort(key = lambda x: x[1])
 
 
 def grayScale(img):
@@ -50,10 +55,10 @@ def laplace_kernel(sigma):
 
 def subsampling(img, step):
     height, width = img.shape[0], img.shape[1]
-    out = np.zeros(((height + 1) // 2, (width + 1) // 2) + img.shape[2:], dtype = np.float64)
+    out = np.zeros(((height + 1) // step, (width + 1) // step) + img.shape[2:], dtype = np.float64)
     for i in range(0, height, step):
         for j in range(0, width, step):
-            out[i // 2, j // 2] = img[i, j]
+            out[i // step, j // step] = img[i, j]
     return out
 
 
@@ -61,16 +66,17 @@ def gaussian(dx, dy, sigma):
     return np.exp(-(dx ** 2 + dy ** 2) / (2 * sigma ** 2))
 
 
-def sift(img, s):
+def sift(img, s = 3):
 
     gray = grayScale(img)
-
 
     sigma0 = 1.6
     layers = max(3, min(gray.shape) // 240)
     k = 2 ** (1 / s)
+    step = 2
     prev_gauss = cv2.filter2D(gray, -1, gaussian_kernel(sigma0))
     out = []
+
 
     # construct gaussian pyramid and dog pyramid
     for layer in range(layers):
@@ -80,7 +86,7 @@ def sift(img, s):
             kernel = gaussian_kernel(sigma_)
             gauss.append(cv2.filter2D(gauss[-1], -1, kernel))
         dog = [gauss[s + 1] - gauss[s] for s in range(s + 2)]
-        prev_gauss = subsampling(gauss[s], 2)
+        prev_gauss = subsampling(gauss[s], step)
 
         # find local extrema
         L = np.stack(dog)
@@ -127,7 +133,7 @@ def sift(img, s):
             drx = (L[r + 1, y, x + 1] - L[r + 1, y, x - 1] - L[r - 1, y, x + 1] + L[r - 1, y, x - 1]) / 4
             dry = (L[r + 1, y + 1, x] - L[r + 1, y - 1, x] - L[r - 1, y + 1, x] + L[r - 1, y - 1, x]) / 4
             dxy = (L[r, y + 1, x + 1] - L[r, y + 1, x - 1] - L[r, y - 1, x + 1] + L[r, y - 1, x - 1]) / 4
-            H = np.array([[drr, dry, drx], [dry, dyy, dxy], [drx, dxy, dyy]])
+            H = np.array([[drr, dry, drx], [dry, dyy, dxy], [drx, dxy, dxx]])
             if abs(np.linalg.det(H)) < 1e-9:
                 continue
             offset = -np.linalg.solve(H, g)
@@ -194,14 +200,14 @@ def sift(img, s):
                 descriptor = np.clip(descriptor, 0, 0.2)
                 descriptor /= (np.linalg.norm(descriptor) + 1e-9)
 
-                out.append((fx * 2 ** layer, fy * 2 ** layer, fr * 2 ** layer, orientation, descriptor, idx == 0))
+                out.append((fx * step ** layer, fy * step ** layer, fr * step ** layer, orientation, descriptor, idx == 0))
     return out
 
 
-def showSift(img, fname, sift_result):
+def showSift(img, fname, sift):
     gray = grayScale(img)
     out = cv2.cvtColor((np.clip(gray, 0, 1) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-    for x, y, sigma, orientation, descriptor, isMainOrientation in sift_result:
+    for x, y, sigma, orientation, descriptor, isMainOrientation in sift:
         cv2.circle(out, (int(x), int(y)), int(round(sigma * 3)), (0, 255, 0), 1)
         rad = np.radians(orientation)
         cv2.line(out, (int(x), int(y)), (int(x + sigma * 3 * np.cos(rad)), int(y + sigma * 3 * np.sin(rad))), (0, 255, 0), 1)
@@ -226,7 +232,7 @@ def showSift(img, fname, sift_result):
                     cv2.line(out, (int(gx), int(gy)), (int(ex), int(ey)), (0, 255, 255), 1)
 
     cv2.imwrite(f"./assets/results/{fname}_.png", out)
-    print(f"{fname}_ saved")
+    print(f"{fname}_.png saved")
     return out
 
 
@@ -237,47 +243,106 @@ def dod(descriptor1, descriptor2):
     return dist
 
 
-def locateMatches(img1, fname1, sift1, img2, fname2, sift2):
+def RANSAC(matches):
+    iterations = 1000
+    best_sam = 0
+    diff = 3
+    out = []
 
-    matches = []
-    for x1, y1, _, _, descriptor1, _ in sift1:
-        best_match = None
-        best_dist = float("inf")
-        second_best_dist = float("inf")
-        for x2, y2, _, _, descriptor2, _ in sift2:
-            dist = dod(descriptor1, descriptor2)
-            if dist < best_dist:
-                second_best_dist = best_dist
-                best_dist = dist
-                best_match = (x2, y2)
-            elif dist < second_best_dist:
-                second_best_dist = dist
-        if best_dist < 0.75 * second_best_dist:
-            matches.append(((x1, y1), best_match, best_dist))
-    matches.sort(key = lambda x: x[2])
-    fig, (ax1, ax2) = plt.subplots(nrows = 1, ncols = 2, figsize=(12, 6))
+    for _ in range(iterations):
+        cur = []
+        dims = random.sample(range(len(matches)), 4)
+        A = np.empty((0, 9), dtype = np.float64)
+        for dim in dims:
+            x1, y1, x2, y2 = matches[dim]
+            newx = np.array([x1, y1, 1, 0, 0, 0, -x2 * x1, -x2 * y1, -x2])
+            newy = np.array([0, 0, 0, x1, y1, 1, -y2 * x1, -y2 * y1, -y2])
+            A = np.vstack([A, newx, newy])
+        _, _, Vt = np.linalg.svd(A, full_matrices = False)
+        v = Vt[-1, : ]
+        v /= (np.linalg.norm(v) + 1e-9)
+        h = v.reshape((3, 3))
 
-    gray1 = grayScale(img1)
-    gray2 = grayScale(img2)
-    ax1.imshow(gray1, cmap = "gray" if gray1.ndim == 2 else None)
-    ax2.imshow(gray2, cmap = "gray" if gray2.ndim == 2 else None)
-    for (x1, y1), (x2, y2), _ in matches[:min(len(matches), 50)]:
-        color = np.random.rand(3,)
-        color.clip(0.4, 1)
-        ax1.plot(x1, y1, 'ro', markersize=2)
-        ax2.plot(x2, y2, 'ro', markersize=2)
-        connection = pths.ConnectionPatch(xyA = (x1, y1), coordsA = ax1.transData, 
-                          xyB = (x2, y2), coordsB = ax2.transData, 
-                          color = color, linewidth = 0.8)
-        fig.add_artist(connection)
-    ax1.set_title(f"{fname1}.1")
-    ax2.set_title(f"{fname2}.2")
-    ax1.axis("off")
-    ax2.axis("off")
-    plt.tight_layout()
-    fig.savefig("./assets/outputs/match.png", dpi = 300, bbox_inches = "tight")
-    plt.show()
-    print(f"{len(matches)} matches found.")
+        sam = 0
+        for x1, y1, x2, y2 in matches:
+            x, y, w = h @ np.array([x1, y1, 1])
+            if abs(x / w - x2) < diff and abs(y / w - y2) < diff:
+                sam += 1
+                cur.append((x1, y1, x2, y2))
+        if sam > best_sam:
+            best_sam = sam
+            out = cur
+
+    return out
+
+
+# locate no loop
+def locateMatches(sift1, sift2):
+
+    desc1 = np.stack([s[4] for s in sift1]).astype(np.float64)
+    desc2 = np.stack([s[4] for s in sift2]).astype(np.float64)
+    N, M = desc1.shape[0], desc2.shape[0]
+
+    sq1 = np.sum(desc1**2, axis=1)[ :, None]
+    sq2 = np.sum(desc2**2, axis=1)[None, : ]
+    dist_ = sq1 + sq2 - 2.0 * np.matmul(desc1, desc2.T)
+    dist = np.sqrt(np.maximum(0.0, dist_))
+
+    idx = dist.argmin(axis = 1)
+    best_dist = dist[np.arange(N), idx]
+    second_best_dist = np.partition(dist, 1, axis = 1)[:, 1]
+    cand = (best_dist < 0.75 * second_best_dist) & (best_dist < 0.8)
+
+    cross_idx = dist.argmin(axis = 0)
+
+    rows = np.nonzero(cand)[0]
+    cross_matched = cross_idx[idx[rows]] == rows
+    cand = rows[cross_matched]
+    
+    coord1 = [(s[0], s[1]) for s in sift1]
+    coord2 = [(s[0], s[1]) for s in sift2] 
+    matches = [(coord1[i][0], coord1[i][1], coord2[idx[i]][0], coord2[idx[i]][1]) for i in cand]
+
+    return RANSAC(matches)
+
+
+def showMatches(imgs, sifts):
+
+    for i in range(len(imgs) - 1):
+
+        img1, name1 = imgs[i]
+        img2, name2 = imgs[i + 1]
+        gray1 = grayScale(img1)
+        gray2 = grayScale(img2)
+        fig, axes = plt.subplots(nrows = 1, ncols = 2, figsize=(12, 6))
+        ax1, ax2 = axes
+        ax1.imshow(gray1, cmap = "gray" if gray1.ndim == 2 else None)
+        ax2.imshow(gray2, cmap = "gray" if gray2.ndim == 2 else None)
+        
+        matches = locateMatches(sifts[i], sifts[i + 1])
+        print(f"fig.{name1} and fig.{name2}: {len(matches)} matches found.")
+        for x1, y1, x2, y2 in matches[: min(8, len(matches))]:
+            color = np.random.rand(3,)
+            color = color.clip(0.4, 1)
+            ax1.plot(x1, y1, 'ro', markersize=2) 
+            ax2.plot(x2, y2, 'ro', markersize=2)
+            connection = pths.ConnectionPatch(xyA = (x1, y1), coordsA = ax1.transData, 
+                              xyB = (x2, y2), coordsB = ax2.transData, 
+                              color = color, linewidth = 0.8)
+            fig.add_artist(connection)
+
+        ax1.set_title(f"fig.{name1}")
+        ax2.set_title(f"fig.{name2}")
+        ax1.axis("off")
+        ax2.axis("off")
+
+        fig.suptitle("Matches", fontsize = 16)
+        plt.tight_layout()
+        plt.subplots_adjust(top = 1)
+        fig.savefig(f"./assets/outputs/{name1} & {name2}.png", dpi = 300, bbox_inches = "tight")
+        # plt.show()
+        print(f"match results of {name1} & {name2} saved.")
+        
 
 
 if __name__ == "__main__":
@@ -286,19 +351,37 @@ if __name__ == "__main__":
         print("No images found in the directory.")
         exit(1)
     sifts = []
+
+    '''
     fig, axes = plt.subplots(nrows = len(imgs), ncols = 2, figsize = (10, 5), squeeze=False)
-    for i, (img, fname) in enumerate(imgs):
+    for i, (img, name) in enumerate(imgs):
         axes[i, 0].imshow(img, cmap = "gray" if img.ndim == 2 else None)
-        axes[i, 0].set_title(f"{fname}.Origin")
+        axes[i, 0].set_title(f"{name}.Origin")
         axes[i, 0].axis("off")
-        sifts.append(sift(img, 3))
-        out = showSift(img, fname, sifts[-1])
+        sifts.append(sift(img))
+        print(f"fig.{name} sift calculated.")
+        out = showSift(img, name, sifts[-1])
         axes[i, 1].imshow(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
-        axes[i, 1].set_title(f"{fname}.Blobs")
+        axes[i, 1].set_title(f"{name}.Sift")
         axes[i, 1].axis("off")
+    fig.suptitle("Sift Descriptors", fontsize = 16)
     plt.tight_layout()
     fig.savefig("./assets/outputs/output.png", dpi = 300, bbox_inches = "tight")
-    plt.show()
+    # plt.show()
+    '''
+    
+    for img, name in imgs:
+        sifts.append(sift(img))
+        fig, axis = plt.subplots(nrows = 1, ncols = 2, figsize = (10, 5))
+        axis[0].imshow(img, cmap = "gray" if img.ndim == 2 else None)
+        axis[0].set_title(f"{name}.Origin")
+        axis[0].axis("off")
+        out = showSift(img, name, sifts[-1])
+        axis[1].imshow(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+        axis[1].set_title(f"{name}.Sift")
+        axis[1].axis("off")
+    
     if len(imgs) >= 2:
-        locateMatches(imgs[0][0], imgs[0][1], sifts[0], imgs[1][0], imgs[1][1], sifts[1])
+        showMatches(imgs, sifts)
+
     print("finished.")
