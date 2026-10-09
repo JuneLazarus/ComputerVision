@@ -266,7 +266,7 @@ def RANSAC(matches):
         sam = 0
         for x1, y1, x2, y2 in matches:
             x, y, w = h @ np.array([x1, y1, 1])
-            if abs(x / w - x2) < diff and abs(y / w - y2) < diff:
+            if abs(x / (w + 1e-9) - x2) < diff and abs(y / (w + 1e-9) - y2) < diff:
                 sam += 1
                 cur.append((x1, y1, x2, y2))
         if sam > best_sam:
